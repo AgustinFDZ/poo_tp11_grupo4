@@ -1,6 +1,7 @@
-# TP10 – API REST de Ventas (Spring Boot)
+# TP10/TP11 – API REST de Ventas (Spring Boot)
 
-API RESTful para gestionar **clientes**, **productos** y **ventas** (contado / financiada con plan de cuotas).
+API RESTful para gestionar **clientes**, **productos** y **ventas** (contado / financiada con plan de cuotas),
+consultar el **estado de cuenta** de un cliente y **cobrar cuotas**. Documentación interactiva con **Swagger**.
 
 ## Requisitos
 - Java 17+, Maven 3.9+ y MySQL 8 (la base `tp10_ventas` se crea sola).
@@ -9,6 +10,20 @@ API RESTful para gestionar **clientes**, **productos** y **ventas** (contado / f
 ```bash
 mvn spring-boot:run      # levanta en http://localhost:8080
 ```
+
+## Documentación interactiva (Swagger)
+Con la aplicación levantada:
+
+| | URL |
+|---|---|
+| Swagger UI (navegar, inspeccionar y **probar** todos los endpoints) | http://localhost:8080/swagger-ui.html |
+| Especificación OpenAPI (JSON) | http://localhost:8080/v3/api-docs |
+
+Implementado con `springdoc-openapi-starter-webmvc-ui`; los controladores están anotados con `@Tag`, `@Operation` y `@ApiResponse`,
+y la configuración general está en `config/OpenApiConfig` y en `application.properties` (`springdoc.*`).
+
+> **Base de datos:** el TP11 reemplaza la columna booleana `cuotas.pagada` por `cuotas.estado` y agrega el estado `SALDADA` a las ventas.
+> Con una base creada por el TP10 hay que borrarla (`DROP DATABASE tp10_ventas;`) para que se regenere el esquema.
 
 ## Arquitectura
 ```
@@ -42,6 +57,31 @@ dto.request / dto.response (record)   mapper   exception (+ GlobalExceptionHandl
 | `ClienteInhabilitadoException`, `ImporteInvalidoException` | 422 |
 | Cualquier otra | 500 |
 
+## Estado de cuenta y cobro de cuotas (TP11)
+
+**Estados de una cuota** (`EstadoCuota`):
+
+| Estado | Significado |
+|---|---|
+| `ADEUDADA` | Pendiente. Puede abonarse hasta su fecha de vencimiento (inclusive) por su monto original. |
+| `VENCIDA` | Pendiente y con la fecha de vencimiento ya superada. Pasa a este estado **automáticamente** cuando se consulta el estado de cuenta o cuando un cliente se presenta a pagar. |
+| `PAGADA` | Ya fue abonada (se guarda la `fechaPago`). |
+
+**Estado general de la venta** (`EstadoVenta`): `ACTIVA`, `SALDADA` (venta financiada sin cuotas pendientes) y `ANULADA`.
+
+**Cobro** — `POST /api/ventas/{ventaId}/cobrar-cuota`:
+- Recibe el identificador de la **venta** y cobra su cuota correlativa pendiente (la primera impaga, por número).
+  Como siempre se cobra la más antigua, **no se pueden saltear cuotas ni cobrar vencimientos futuros** existiendo saldos impagos anteriores.
+- Si la cuota ya había vencido, pasa a `VENCIDA` antes de cobrarse y la respuesta indica `pagoFueraDeTermino: true`. Se cobra por su monto original (el enunciado no define recargos por mora).
+- Al cobrar la última cuota adeudada la venta verifica que no queden compromisos pendientes y pasa automáticamente a `SALDADA`.
+- La venta se lee con bloqueo pesimista (`VentaRepository.buscarConBloqueo`): dos cobros simultáneos no pueden pagar la misma cuota.
+- `409` si la venta es de contado, está anulada o ya está saldada; `404` si no existe.
+
+**Estado de cuenta** — `GET /api/ventas/cliente/{clienteId}/estado-cuenta`: datos del cliente, historial de ventas
+(contado y financiadas, con su estado), cuotas pendientes con su estado (`ADEUDADA`/`VENCIDA`), cantidad de cuotas vencidas, y totales pendiente y vencido.
+
+El "hoy" lo da un `Clock` inyectable (`config/ClockConfig`), por eso los vencimientos se prueban fijando la fecha en los tests.
+
 ## Reglas de negocio de la venta
 Configurables en `application.properties` (`ventas.contado.descuento`, `ventas.financiada.recargo`, `ventas.financiada.cuotas-por-defecto`).
 
@@ -58,7 +98,7 @@ Si algo falla se revierte todo (`@Transactional`). Anular una venta repone el st
 ```bash
 mvn test
 ```
-- **Servicios (JUnit 5 + Mockito):** `PoliticaContadoTest`, `PoliticaFinanciadaTest`, `PlanCuotasServiceImplTest`, `StockServiceImplTest`, `VentaServiceImplTest`, `CuotaServiceImplTest`, `ClienteServiceImplTest`, `ProductoServiceImplTest`.
+- **Servicios (JUnit 5 + Mockito):** `PoliticaContadoTest`, `PoliticaFinanciadaTest`, `PlanCuotasServiceImplTest`, `StockServiceImplTest`, `VentaServiceImplTest`, `CuotaServiceImplTest` (estado de cuenta, cobro correlativo, vencimientos y saldado de la venta), `ClienteServiceImplTest`, `ProductoServiceImplTest`.
 - **Capa web (`@WebMvcTest` + MockMvc):** `VentaControllerTest`, `ClienteControllerTest`, `ProductoControllerTest` verifican códigos HTTP, JSON de respuesta y el mapeo de excepciones.
 - Los tests no necesitan MySQL.
 
@@ -89,10 +129,10 @@ mvn test
 | DELETE | `/api/ventas/{id}` | Anular venta (repone stock) |
 | GET | `/api/ventas` , `/{id}` | Listar / obtener |
 | GET | `/api/ventas/cliente/{clienteId}` | Historial del cliente |
-| GET | `/api/ventas/cliente/{clienteId}/estado-cuenta` | Cuotas pendientes y total adeudado |
+| GET | `/api/ventas/cliente/{clienteId}/estado-cuenta` | Estado de cuenta: cliente, historial de ventas y cuotas pendientes/vencidas |
 | GET | `/api/ventas/periodo?desde=2026-01-01&hasta=2026-12-31` | Ventas por rango de fechas |
 | GET | `/api/ventas/modalidad/{CONTADO\|FINANCIADA}` | Filtrar por modalidad |
-| PATCH | `/api/ventas/cuotas/{cuotaId}/pagar` | Registrar pago de cuota |
+| POST | `/api/ventas/{ventaId}/cobrar-cuota` | Cobrar la próxima cuota pendiente de la venta (la pasa a `SALDADA` al cobrar la última) |
 
 ### Ejemplos
 ```bash
@@ -104,6 +144,9 @@ curl -X POST localhost:8080/api/productos -H "Content-Type: application/json" \
 
 curl -X POST localhost:8080/api/ventas -H "Content-Type: application/json" \
   -d '{"clienteId":1,"modalidadPago":"FINANCIADA","cantidadCuotas":6,"items":[{"productoId":1,"cantidad":2}]}'
+
+curl localhost:8080/api/ventas/cliente/1/estado-cuenta
+curl -X POST localhost:8080/api/ventas/1/cobrar-cuota
 ```
 
 ## Flujo de trabajo con Git (obligatorio)
@@ -117,5 +160,6 @@ git checkout -b feature/clientes-controller
 git commit -am "feat: endpoints CRUD de clientes"
 git push -u origin feature/clientes-controller   # abrir Merge/Pull Request hacia main y pedir revisión
 ```
-Ramas sugeridas: `feature/clientes`, `feature/productos`, `feature/ventas`, `feature/manejo-excepciones`.
+Ramas sugeridas: `feature/clientes`, `feature/productos`, `feature/ventas`, `feature/manejo-excepciones`;
+para el TP11: `feature/estado-cuenta`, `feature/cobro-cuotas` y `feature/swagger`.
 Convención de commits: `feat:`, `fix:`, `docs:`, `refactor:`.
