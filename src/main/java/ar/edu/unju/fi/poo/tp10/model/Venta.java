@@ -70,6 +70,14 @@ public abstract class Venta {
         return estado == EstadoVenta.ANULADA;
     }
 
+    public boolean estaSaldada() {
+        return estado == EstadoVenta.SALDADA;
+    }
+
+    public void saldar() {
+        this.estado = EstadoVenta.SALDADA;
+    }
+
     public void anular() {
         this.estado = EstadoVenta.ANULADA;
     }
