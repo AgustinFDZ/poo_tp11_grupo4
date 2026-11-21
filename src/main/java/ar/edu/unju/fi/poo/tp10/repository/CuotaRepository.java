@@ -9,11 +9,12 @@ import java.util.List;
 
 public interface CuotaRepository extends JpaRepository<Cuota, Long> {
 
+    /** Cuotas impagas (adeudadas o vencidas) de las ventas no anuladas de un cliente. */
     @Query("""
             SELECT c FROM Cuota c
             WHERE c.venta.cliente.id = :clienteId
-              AND c.pagada = false
-              AND c.venta.estado = ar.edu.unju.fi.poo.tp10.model.EstadoVenta.ACTIVA
+              AND c.estado <> ar.edu.unju.fi.poo.tp10.model.EstadoCuota.PAGADA
+              AND c.venta.estado <> ar.edu.unju.fi.poo.tp10.model.EstadoVenta.ANULADA
             ORDER BY c.fechaVencimiento ASC, c.numero ASC
             """)
     List<Cuota> findPendientesByCliente(@Param("clienteId") Long clienteId);
