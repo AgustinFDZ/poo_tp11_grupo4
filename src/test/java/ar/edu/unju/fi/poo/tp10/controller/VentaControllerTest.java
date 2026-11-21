@@ -1,10 +1,14 @@
 package ar.edu.unju.fi.poo.tp10.controller;
 
 import ar.edu.unju.fi.poo.tp10.dto.request.VentaRequest;
+import ar.edu.unju.fi.poo.tp10.dto.response.ClienteResponse;
+import ar.edu.unju.fi.poo.tp10.dto.response.CobroCuotaResponse;
+import ar.edu.unju.fi.poo.tp10.dto.response.CuotaResponse;
 import ar.edu.unju.fi.poo.tp10.dto.response.EstadoCuentaResponse;
 import ar.edu.unju.fi.poo.tp10.dto.response.VentaContadoResponse;
 import ar.edu.unju.fi.poo.tp10.dto.response.VentaFinanciadaResponse;
 import ar.edu.unju.fi.poo.tp10.exception.*;
+import ar.edu.unju.fi.poo.tp10.model.EstadoCuota;
 import ar.edu.unju.fi.poo.tp10.model.EstadoVenta;
 import ar.edu.unju.fi.poo.tp10.model.ModalidadPago;
 import ar.edu.unju.fi.poo.tp10.service.ICuotaService;
@@ -199,15 +203,34 @@ class VentaControllerTest {
     }
 
     @Test
-    @DisplayName("GET estado de cuenta → 200")
+    @DisplayName("GET estado de cuenta → 200 con cliente, ventas y cuotas pendientes")
     void estadoDeCuenta() throws Exception {
-        when(cuotaService.estadoDeCuenta(1L))
-                .thenReturn(new EstadoCuentaResponse(1L, "Ana Pérez", 0, BigDecimal.ZERO, List.of()));
+        CuotaResponse vencida = new CuotaResponse(5L, 2L, 1, new BigDecimal("325833.33"),
+                LocalDate.of(2026, 12, 13), EstadoCuota.VENCIDA, null);
+        when(cuotaService.estadoDeCuenta(1L)).thenReturn(new EstadoCuentaResponse(
+                new ClienteResponse(1L, "40123456", "Ana Pérez", "ana@mail.com", "3884000000", true),
+                List.of(financiadaResponse()), 1, 1, new BigDecimal("325833.33"), new BigDecimal("325833.33"),
+                List.of(vencida)));
 
         mockMvc.perform(get("/api/ventas/cliente/1/estado-cuenta"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.clienteId").value(1))
-                .andExpect(jsonPath("$.cantidadCuotasPendientes").value(0));
+                .andExpect(jsonPath("$.cliente.id").value(1))
+                .andExpect(jsonPath("$.cliente.nombre").value("Ana Pérez"))
+                .andExpect(jsonPath("$.ventas.length()").value(1))
+                .andExpect(jsonPath("$.ventas[0].modalidadPago").value("FINANCIADA"))
+                .andExpect(jsonPath("$.cantidadCuotasPendientes").value(1))
+                .andExpect(jsonPath("$.cantidadCuotasVencidas").value(1))
+                .andExpect(jsonPath("$.cuotasPendientes[0].estado").value("VENCIDA"));
+    }
+
+    @Test
+    @DisplayName("GET estado de cuenta de un cliente inexistente → 404")
+    void estadoDeCuentaClienteInexistente() throws Exception {
+        when(cuotaService.estadoDeCuenta(99L)).thenThrow(new RecursoNoEncontradoException("Cliente", 99L));
+
+        mockMvc.perform(get("/api/ventas/cliente/99/estado-cuenta"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404));
     }
 
     @Test
@@ -257,13 +280,39 @@ class VentaControllerTest {
     // ---------------- cuotas y anulación ----------------
 
     @Test
-    @DisplayName("PATCH pagar una cuota ya pagada → 409")
-    void cuotaYaPagada() throws Exception {
-        when(cuotaService.pagarCuota(1L)).thenThrow(new OperacionNoPermitidaException("La cuota 1 ya fue pagada"));
+    @DisplayName("POST cobrar-cuota → 200 con la cuota cobrada y el estado de la venta")
+    void cobrarCuota() throws Exception {
+        CuotaResponse pagada = new CuotaResponse(7L, 2L, 6, new BigDecimal("325833.35"),
+                LocalDate.of(2027, 5, 13), EstadoCuota.PAGADA, LocalDate.of(2026, 11, 16));
+        when(cuotaService.cobrarCuota(2L)).thenReturn(
+                new CobroCuotaResponse(2L, pagada, false, EstadoVenta.SALDADA, 0, BigDecimal.ZERO));
 
-        mockMvc.perform(patch("/api/ventas/cuotas/1/pagar"))
+        mockMvc.perform(post("/api/ventas/2/cobrar-cuota"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ventaId").value(2))
+                .andExpect(jsonPath("$.cuotaCobrada.estado").value("PAGADA"))
+                .andExpect(jsonPath("$.estadoVenta").value("SALDADA"))
+                .andExpect(jsonPath("$.cuotasPendientes").value(0))
+                .andExpect(jsonPath("$.pagoFueraDeTermino").value(false));
+    }
+
+    @Test
+    @DisplayName("POST cobrar-cuota de una venta saldada, anulada o de contado → 409")
+    void cobrarCuotaNoPermitido() throws Exception {
+        when(cuotaService.cobrarCuota(1L)).thenThrow(new OperacionNoPermitidaException("La venta 1 ya está saldada"));
+
+        mockMvc.perform(post("/api/ventas/1/cobrar-cuota"))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.mensaje").value("La cuota 1 ya fue pagada"));
+                .andExpect(jsonPath("$.mensaje").value("La venta 1 ya está saldada"));
+    }
+
+    @Test
+    @DisplayName("POST cobrar-cuota de una venta inexistente → 404")
+    void cobrarCuotaVentaInexistente() throws Exception {
+        when(cuotaService.cobrarCuota(99L)).thenThrow(new RecursoNoEncontradoException("Venta", 99L));
+
+        mockMvc.perform(post("/api/ventas/99/cobrar-cuota"))
+                .andExpect(status().isNotFound());
     }
 
     @Test

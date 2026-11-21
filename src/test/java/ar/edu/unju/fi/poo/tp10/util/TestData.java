@@ -5,11 +5,14 @@ import ar.edu.unju.fi.poo.tp10.model.DetalleVenta;
 import ar.edu.unju.fi.poo.tp10.model.Producto;
 
 import java.math.BigDecimal;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** Fábrica de datos de prueba compartida por los tests. */
 public final class TestData {
+
+    private static final AtomicLong SECUENCIA = new AtomicLong(System.currentTimeMillis() % 1_000_000L);
 
     private TestData() {}
 
@@ -23,6 +26,24 @@ public final class TestData {
         return c;
     }
 
+    /** DNI de 8 dígitos distinto en cada llamada (evita choques con datos que ya existan en la base). */
+    public static String dniUnico() {
+        return String.valueOf(20_000_000L + SECUENCIA.incrementAndGet() % 70_000_000L);
+    }
+
+    public static String emailUnico() {
+        return "cliente" + SECUENCIA.incrementAndGet() + "@test.com";
+    }
+
+    /** Cliente listo para persistir: sin id y con DNI/email únicos. */
+    public static Cliente clienteUnico(boolean habilitado) {
+        Cliente c = cliente(null, habilitado);
+        c.setDniCuit(dniUnico());
+        c.setEmail(emailUnico());
+        return c;
+    }
+
+    /** Para persistir un producto pasar id = null. */
     public static Producto producto(Long id, String nombre, String precio, int stock) {
         Producto p = new Producto();
         p.setId(id);
