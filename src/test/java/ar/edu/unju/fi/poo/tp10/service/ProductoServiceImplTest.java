@@ -7,68 +7,63 @@ import ar.edu.unju.fi.poo.tp10.exception.SolicitudInvalidaException;
 import ar.edu.unju.fi.poo.tp10.model.Producto;
 import ar.edu.unju.fi.poo.tp10.repository.ProductoRepository;
 import ar.edu.unju.fi.poo.tp10.service.impl.ProductoServiceImpl;
+import ar.edu.unju.fi.poo.tp10.util.AbstractDbTest;
 import ar.edu.unju.fi.poo.tp10.util.TestData;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
-import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
-class ProductoServiceImplTest {
+class ProductoServiceImplTest extends AbstractDbTest {
 
-    @Mock
+    @Autowired
+    private ProductoServiceImpl service;
+    @Autowired
     private ProductoRepository productoRepository;
 
-    @InjectMocks
-    private ProductoServiceImpl service;
+    private Producto guardar(String nombre, int stock) {
+        return productoRepository.save(TestData.producto(null, nombre, "100", stock));
+    }
+
+    private List<Long> ids(List<ProductoResponse> productos) {
+        return productos.stream().map(ProductoResponse::id).toList();
+    }
 
     @Test
     @DisplayName("Crea un producto")
     void crear() {
-        when(productoRepository.save(any(Producto.class))).thenAnswer(inv -> {
-            Producto p = inv.getArgument(0);
-            p.setId(1L);
-            return p;
-        });
-
         ProductoResponse r = service.crear(new ProductoRequest("Notebook", "Notebooks", "Lenovo",
                 new BigDecimal("850000"), 10, 3));
 
-        assertEquals(1L, r.id());
+        assertNotNull(r.id());
         assertEquals("Lenovo", r.marca());
         assertEquals(10, r.stock());
+
+        sincronizarYLimpiar();
+        Producto guardado = productoRepository.findById(r.id()).orElseThrow();
+        assertEquals(10, guardado.getStock());
+        assertTrue(guardado.isActivo());
     }
 
     @Test
     @DisplayName("Desactivar hace una baja lógica")
     void desactivar() {
-        Producto p = TestData.producto(1L, "Notebook", "100", 5);
-        when(productoRepository.findById(1L)).thenReturn(Optional.of(p));
+        Producto p = guardar("Notebook", 5);
 
-        service.desactivar(1L);
+        service.desactivar(p.getId());
 
-        assertFalse(p.isActivo());
-        verify(productoRepository).save(p);
+        sincronizarYLimpiar();
+        assertFalse(productoRepository.findById(p.getId()).orElseThrow().isActivo());
     }
 
     @Test
     @DisplayName("Obtener un producto inexistente lanza RecursoNoEncontradoException")
     void obtenerInexistente() {
-        when(productoRepository.findById(99L)).thenReturn(Optional.empty());
-
-        assertThrows(RecursoNoEncontradoException.class, () -> service.obtenerPorId(99L));
+        assertThrows(RecursoNoEncontradoException.class, () -> service.obtenerPorId(Long.MAX_VALUE));
     }
 
     @Test
@@ -76,8 +71,6 @@ class ProductoServiceImplTest {
     void rangoInvalido() {
         assertThrows(SolicitudInvalidaException.class,
                 () -> service.filtrar(null, null, new BigDecimal("500"), new BigDecimal("100")));
-
-        verifyNoInteractions(productoRepository);
     }
 
     @Test
@@ -85,46 +78,52 @@ class ProductoServiceImplTest {
     void preciosNegativos() {
         assertThrows(SolicitudInvalidaException.class,
                 () -> service.filtrar(null, null, new BigDecimal("-1"), null));
-
-        verifyNoInteractions(productoRepository);
     }
 
     @Test
     @DisplayName("Los filtros vacíos se tratan como ausentes")
     void filtrosVaciosComoNulos() {
-        when(productoRepository.filtrar(isNull(), eq("Lenovo"), isNull(), isNull()))
-                .thenReturn(List.of(TestData.producto(1L, "Notebook", "100", 5)));
+        String marca = "Marca" + TestData.dniUnico();
+        Producto p = TestData.producto(null, "Notebook", "100", 5);
+        p.setMarca(marca);
+        p = productoRepository.save(p);
 
-        List<ProductoResponse> r = service.filtrar("   ", " Lenovo ", null, null);
+        List<ProductoResponse> r = service.filtrar("   ", " " + marca + " ", null, null);
 
         assertEquals(1, r.size());
+        assertEquals(p.getId(), r.get(0).id());
     }
 
     @Test
     @DisplayName("Stock crítico sin umbral usa el stock mínimo de cada producto")
     void stockCriticoSinUmbral() {
-        when(productoRepository.findStockCritico()).thenReturn(List.of(TestData.producto(1L, "Mouse", "100", 2)));
+        Producto critico = guardar("Mouse", 2);      // stock 2 <= mínimo 3
+        Producto normal = guardar("Teclado", 50);    // stock 50 > mínimo 3
 
-        assertEquals(1, service.stockCritico(null).size());
-        verify(productoRepository, never()).findByActivoTrueAndStockLessThanEqualOrderByStockAsc(anyInt());
+        List<Long> ids = ids(service.stockCritico(null));
+
+        assertTrue(ids.contains(critico.getId()));
+        assertFalse(ids.contains(normal.getId()));
     }
 
     @Test
-    @DisplayName("Stock crítico con umbral filtra por ese umbral")
+    @DisplayName("Stock crítico con umbral filtra por ese umbral y ordena por stock ascendente")
     void stockCriticoConUmbral() {
-        when(productoRepository.findByActivoTrueAndStockLessThanEqualOrderByStockAsc(10))
-                .thenReturn(List.of(TestData.producto(1L, "Mouse", "100", 2),
-                        TestData.producto(2L, "Teclado", "100", 8)));
+        Producto a = guardar("Mouse", 2);
+        Producto b = guardar("Teclado", 8);
+        Producto c = guardar("Monitor", 50);
 
-        assertEquals(2, service.stockCritico(10).size());
-        verify(productoRepository, never()).findStockCritico();
+        List<Long> ids = ids(service.stockCritico(10));
+
+        assertTrue(ids.contains(a.getId()));
+        assertTrue(ids.contains(b.getId()));
+        assertFalse(ids.contains(c.getId()));
+        assertTrue(ids.indexOf(a.getId()) < ids.indexOf(b.getId()));
     }
 
     @Test
     @DisplayName("Un umbral negativo es inválido")
     void umbralNegativo() {
         assertThrows(SolicitudInvalidaException.class, () -> service.stockCritico(-1));
-
-        verifyNoInteractions(productoRepository);
     }
 }

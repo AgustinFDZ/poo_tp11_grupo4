@@ -7,58 +7,77 @@ import ar.edu.unju.fi.poo.tp10.dto.response.VentaFinanciadaResponse;
 import ar.edu.unju.fi.poo.tp10.dto.response.VentaResponse;
 import ar.edu.unju.fi.poo.tp10.exception.*;
 import ar.edu.unju.fi.poo.tp10.model.*;
+import ar.edu.unju.fi.poo.tp10.repository.ClienteRepository;
+import ar.edu.unju.fi.poo.tp10.repository.ProductoRepository;
 import ar.edu.unju.fi.poo.tp10.repository.VentaRepository;
 import ar.edu.unju.fi.poo.tp10.service.impl.PlanCuotasServiceImpl;
 import ar.edu.unju.fi.poo.tp10.service.impl.PoliticaContado;
 import ar.edu.unju.fi.poo.tp10.service.impl.PoliticaFinanciada;
 import ar.edu.unju.fi.poo.tp10.service.impl.VentaServiceImpl;
+import ar.edu.unju.fi.poo.tp10.util.AbstractDbTest;
 import ar.edu.unju.fi.poo.tp10.util.TestData;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
-class VentaServiceImplTest {
+/**
+ * VentaServiceImpl con repositorios, validador de clientes y stock REALES sobre MySQL.
+ * Las políticas se arman con valores fijos (10% / 15% / 6 cuotas) para que los importes sean predecibles.
+ */
+class VentaServiceImplTest extends AbstractDbTest {
 
-    @Mock
+    @Autowired
     private VentaRepository ventaRepository;
-    @Mock
+    @Autowired
+    private ClienteRepository clienteRepository;
+    @Autowired
+    private ProductoRepository productoRepository;
+    @Autowired
     private IClienteValidador clienteValidador;
-    @Mock
+    @Autowired
     private IStockService stockService;
 
     private VentaServiceImpl service;
-    private final Cliente cliente = TestData.cliente(1L, true);
+    private Cliente cliente;
 
     @BeforeEach
     void setUp() {
+        cliente = clienteRepository.save(TestData.clienteUnico(true));
         service = new VentaServiceImpl(ventaRepository, clienteValidador, stockService, List.of(
                 new PoliticaContado(new BigDecimal("0.10")),
                 new PoliticaFinanciada(new PlanCuotasServiceImpl(), new BigDecimal("0.15"), 6)));
     }
 
-    private VentaContado ventaContado(Long id) {
-        Producto p = TestData.producto(2L, "Mouse", "100", 5);
-        VentaContado v = new VentaContado(new BigDecimal("0.10"));
-        v.setId(id);
-        v.setFecha(LocalDate.now());
-        v.setCliente(cliente);
-        v.agregarDetalle(TestData.detalle(p, 1));
-        v.recalcular();
-        return v;
+    // ---------------- helpers ----------------
+
+    private Producto producto(String nombre, String precio, int stock) {
+        return productoRepository.save(TestData.producto(null, nombre, precio, stock));
+    }
+
+    private VentaRequest pedido(ModalidadPago modalidad, Integer cuotas, Producto p, int cantidad) {
+        return new VentaRequest(cliente.getId(), modalidad, cuotas,
+                List.of(new ItemVentaRequest(p.getId(), cantidad)));
+    }
+
+    private VentaResponse registrarContado(Producto p, int cantidad) {
+        return service.registrar(pedido(ModalidadPago.CONTADO, null, p, cantidad));
+    }
+
+    private VentaResponse registrarFinanciada(Producto p, int cantidad, Integer cuotas) {
+        return service.registrar(pedido(ModalidadPago.FINANCIADA, cuotas, p, cantidad));
+    }
+
+    /** Stock tal como está en MySQL (fuerza la escritura y relee la fila). */
+    private int stockEnBd(Producto p) {
+        sincronizarYLimpiar();
+        return productoRepository.findById(p.getId()).orElseThrow().getStock();
     }
 
     // ---------------- registrar ----------------
@@ -66,35 +85,29 @@ class VentaServiceImplTest {
     @Test
     @DisplayName("Registra una venta de contado: coordina cliente, stock y descuento")
     void registrarContado() {
-        Producto p = TestData.producto(2L, "Mouse", "15000", 5);
-        when(clienteValidador.obtenerHabilitado(1L)).thenReturn(cliente);
-        when(stockService.reservar(anyList())).thenReturn(List.of(TestData.detalle(p, 1)));
-        when(ventaRepository.save(any(Venta.class))).thenAnswer(inv -> inv.getArgument(0));
+        Producto p = producto("Mouse", "15000", 5);
 
-        VentaResponse r = service.registrar(new VentaRequest(1L, ModalidadPago.CONTADO, null,
-                List.of(new ItemVentaRequest(2L, 1))));
+        VentaResponse r = registrarContado(p, 1);
 
+        assertNotNull(r.id());
         assertInstanceOf(VentaContadoResponse.class, r);
         VentaContadoResponse contado = (VentaContadoResponse) r;
         assertEquals(ModalidadPago.CONTADO, r.modalidadPago());
-        assertEquals(1L, r.clienteId());
+        assertEquals(cliente.getId(), r.clienteId());
         TestData.assertMonto("15000", r.subtotal());
         TestData.assertMonto("1500", contado.descuento());
         TestData.assertMonto("13500", r.total());
-        verify(stockService).reservar(anyList());
-        verify(ventaRepository).save(any(Venta.class));
+
+        assertEquals(4, stockEnBd(p));                                   // stock descontado en la base
+        assertTrue(ventaRepository.findById(r.id()).isPresent());        // venta guardada
     }
 
     @Test
     @DisplayName("Registra una venta financiada: recargo y plan de cuotas")
     void registrarFinanciada() {
-        Producto p = TestData.producto(2L, "Notebook", "1000", 5);
-        when(clienteValidador.obtenerHabilitado(1L)).thenReturn(cliente);
-        when(stockService.reservar(anyList())).thenReturn(List.of(TestData.detalle(p, 2)));
-        when(ventaRepository.save(any(Venta.class))).thenAnswer(inv -> inv.getArgument(0));
+        Producto p = producto("Notebook", "1000", 5);
 
-        VentaResponse r = service.registrar(new VentaRequest(1L, ModalidadPago.FINANCIADA, 3,
-                List.of(new ItemVentaRequest(2L, 2))));
+        VentaResponse r = registrarFinanciada(p, 2, 3);
 
         assertInstanceOf(VentaFinanciadaResponse.class, r);
         VentaFinanciadaResponse f = (VentaFinanciadaResponse) r;
@@ -104,53 +117,57 @@ class VentaServiceImplTest {
         TestData.assertMonto("2300", r.total());
         assertEquals(3, f.cantidadCuotas());
         assertEquals(3, f.cuotas().size());
+        assertEquals(3, stockEnBd(p));
     }
 
     @Test
     @DisplayName("Una venta financiada sin cantidad de cuotas usa 6 por defecto")
     void financiadaCuotasPorDefecto() {
-        Producto p = TestData.producto(2L, "Notebook", "1000", 5);
-        when(clienteValidador.obtenerHabilitado(1L)).thenReturn(cliente);
-        when(stockService.reservar(anyList())).thenReturn(List.of(TestData.detalle(p, 1)));
-        when(ventaRepository.save(any(Venta.class))).thenAnswer(inv -> inv.getArgument(0));
+        Producto p = producto("Notebook", "1000", 5);
 
-        VentaFinanciadaResponse f = (VentaFinanciadaResponse) service.registrar(
-                new VentaRequest(1L, ModalidadPago.FINANCIADA, null, List.of(new ItemVentaRequest(2L, 1))));
+        VentaFinanciadaResponse f = (VentaFinanciadaResponse) registrarFinanciada(p, 1, null);
 
         assertEquals(6, f.cantidadCuotas());
     }
 
     @Test
-    @DisplayName("Una venta de contado con cuotas se rechaza antes de tocar cliente o stock")
+    @DisplayName("Una venta de contado con cuotas se rechaza sin tocar stock ni guardar la venta")
     void contadoConCuotasSeRechaza() {
-        VentaRequest req = new VentaRequest(1L, ModalidadPago.CONTADO, 6, List.of(new ItemVentaRequest(2L, 1)));
+        Producto p = producto("Mouse", "100", 5);
+        long ventasAntes = ventaRepository.count();
 
-        assertThrows(SolicitudInvalidaException.class, () -> service.registrar(req));
+        assertThrows(SolicitudInvalidaException.class,
+                () -> service.registrar(pedido(ModalidadPago.CONTADO, 6, p, 1)));
 
-        verifyNoInteractions(clienteValidador, stockService, ventaRepository);
+        assertEquals(ventasAntes, ventaRepository.count());
+        assertEquals(5, stockEnBd(p));
     }
 
     @Test
     @DisplayName("Cliente inhabilitado: no se reserva stock ni se guarda la venta")
     void clienteInhabilitado() {
-        when(clienteValidador.obtenerHabilitado(1L)).thenThrow(new ClienteInhabilitadoException("Ana Pérez"));
+        Cliente inhabilitado = clienteRepository.save(TestData.clienteUnico(false));
+        Producto p = producto("Mouse", "100", 5);
+        long ventasAntes = ventaRepository.count();
 
         assertThrows(ClienteInhabilitadoException.class, () -> service.registrar(
-                new VentaRequest(1L, ModalidadPago.CONTADO, null, List.of(new ItemVentaRequest(2L, 1)))));
+                new VentaRequest(inhabilitado.getId(), ModalidadPago.CONTADO, null,
+                        List.of(new ItemVentaRequest(p.getId(), 1)))));
 
-        verifyNoInteractions(stockService, ventaRepository);
+        assertEquals(ventasAntes, ventaRepository.count());
+        assertEquals(5, stockEnBd(p));
     }
 
     @Test
-    @DisplayName("Stock insuficiente: no se guarda la venta")
+    @DisplayName("Stock insuficiente: no se guarda la venta ni cambia el stock")
     void stockInsuficiente() {
-        when(clienteValidador.obtenerHabilitado(1L)).thenReturn(cliente);
-        when(stockService.reservar(anyList())).thenThrow(new StockInsuficienteException("Notebook", 2, 5));
+        Producto p = producto("Notebook", "100", 2);
+        long ventasAntes = ventaRepository.count();
 
-        assertThrows(StockInsuficienteException.class, () -> service.registrar(
-                new VentaRequest(1L, ModalidadPago.FINANCIADA, 6, List.of(new ItemVentaRequest(2L, 5)))));
+        assertThrows(StockInsuficienteException.class, () -> registrarFinanciada(p, 5, 6));
 
-        verifyNoInteractions(ventaRepository);
+        assertEquals(ventasAntes, ventaRepository.count());
+        assertEquals(2, stockEnBd(p));
     }
 
     // ---------------- anular ----------------
@@ -158,80 +175,80 @@ class VentaServiceImplTest {
     @Test
     @DisplayName("Anular repone el stock y deja la venta ANULADA")
     void anular() {
-        VentaContado v = ventaContado(5L);
-        when(ventaRepository.findById(5L)).thenReturn(Optional.of(v));
-        when(ventaRepository.save(any(Venta.class))).thenAnswer(inv -> inv.getArgument(0));
+        Producto p = producto("Mouse", "100", 5);
+        VentaResponse creada = registrarContado(p, 2);          // stock 5 -> 3
 
-        VentaResponse r = service.anular(5L);
+        VentaResponse r = service.anular(creada.id());
 
         assertEquals(EstadoVenta.ANULADA, r.estado());
-        verify(stockService).reponer(v);
+        assertEquals(5, stockEnBd(p));                           // stock repuesto en la base
+        assertEquals(EstadoVenta.ANULADA, ventaRepository.findById(creada.id()).orElseThrow().getEstado());
     }
 
     @Test
-    @DisplayName("Anular una venta ya anulada lanza OperacionNoPermitidaException")
+    @DisplayName("Anular una venta ya anulada lanza OperacionNoPermitidaException y no repone de nuevo")
     void anularDosVeces() {
-        VentaContado v = ventaContado(5L);
-        v.anular();
-        when(ventaRepository.findById(5L)).thenReturn(Optional.of(v));
+        Producto p = producto("Mouse", "100", 5);
+        VentaResponse creada = registrarContado(p, 2);
+        service.anular(creada.id());
 
-        assertThrows(OperacionNoPermitidaException.class, () -> service.anular(5L));
+        assertThrows(OperacionNoPermitidaException.class, () -> service.anular(creada.id()));
 
-        verify(stockService, never()).reponer(any());
+        assertEquals(5, stockEnBd(p));                           // no quedó en 7
     }
 
     @Test
     @DisplayName("Anular una venta inexistente lanza RecursoNoEncontradoException")
     void anularInexistente() {
-        when(ventaRepository.findById(99L)).thenReturn(Optional.empty());
-
-        assertThrows(RecursoNoEncontradoException.class, () -> service.anular(99L));
+        assertThrows(RecursoNoEncontradoException.class, () -> service.anular(Long.MAX_VALUE));
     }
 
     // ---------------- consultas ----------------
 
     @Test
-    @DisplayName("Obtiene una venta por id")
+    @DisplayName("Obtiene una venta por id (releída desde la base)")
     void obtenerPorId() {
-        when(ventaRepository.findById(5L)).thenReturn(Optional.of(ventaContado(5L)));
+        VentaResponse creada = registrarContado(producto("Mouse", "100", 5), 1);
+        sincronizarYLimpiar();
 
-        VentaResponse r = service.obtenerPorId(5L);
+        VentaResponse r = service.obtenerPorId(creada.id());
 
-        assertEquals(5L, r.id());
+        assertEquals(creada.id(), r.id());
         assertInstanceOf(VentaContadoResponse.class, r);
     }
 
     @Test
-    @DisplayName("Historial por cliente devuelve sus ventas")
+    @DisplayName("Historial por cliente devuelve sus ventas, la más reciente primero")
     void historialPorCliente() {
-        when(clienteValidador.obtenerExistente(1L)).thenReturn(cliente);
-        when(ventaRepository.findByClienteIdOrderByFechaDescIdDesc(1L))
-                .thenReturn(List.of(ventaContado(2L), ventaContado(1L)));
+        Producto p = producto("Mouse", "100", 10);
+        VentaResponse primera = registrarContado(p, 1);
+        VentaResponse segunda = registrarContado(p, 1);
+        sincronizarYLimpiar();
 
-        List<VentaResponse> r = service.historialPorCliente(1L);
+        List<VentaResponse> r = service.historialPorCliente(cliente.getId());
 
         assertEquals(2, r.size());
+        assertEquals(segunda.id(), r.get(0).id());   // misma fecha: desempata por id descendente
+        assertEquals(primera.id(), r.get(1).id());
     }
 
     @Test
     @DisplayName("Historial de un cliente inexistente lanza RecursoNoEncontradoException")
     void historialClienteInexistente() {
-        when(clienteValidador.obtenerExistente(99L)).thenThrow(new RecursoNoEncontradoException("Cliente", 99L));
-
-        assertThrows(RecursoNoEncontradoException.class, () -> service.historialPorCliente(99L));
-
-        verifyNoInteractions(ventaRepository);
+        assertThrows(RecursoNoEncontradoException.class, () -> service.historialPorCliente(Long.MAX_VALUE));
     }
 
     @Test
     @DisplayName("Busca ventas dentro de un período")
     void buscarPorPeriodo() {
-        LocalDate desde = LocalDate.of(2026, 11, 1);
-        LocalDate hasta = LocalDate.of(2026, 11, 30);
-        when(ventaRepository.findByFechaBetweenOrderByFechaAscIdAsc(desde, hasta))
-                .thenReturn(List.of(ventaContado(1L)));
+        VentaResponse creada = registrarContado(producto("Mouse", "100", 5), 1);
+        LocalDate hoy = LocalDate.now();
 
-        assertEquals(1, service.buscarPorPeriodo(desde, hasta).size());
+        List<VentaResponse> deHoy = service.buscarPorPeriodo(hoy.minusDays(1), hoy.plusDays(1));
+        List<VentaResponse> deOtroAnio = service.buscarPorPeriodo(LocalDate.of(1990, 1, 1), LocalDate.of(1990, 1, 31));
+
+        assertTrue(deHoy.stream().anyMatch(v -> v.id().equals(creada.id())));
+        assertTrue(deOtroAnio.isEmpty());
     }
 
     @Test
@@ -239,28 +256,35 @@ class VentaServiceImplTest {
     void periodoInvalido() {
         assertThrows(SolicitudInvalidaException.class,
                 () -> service.buscarPorPeriodo(LocalDate.of(2026, 12, 1), LocalDate.of(2026, 11, 1)));
-
-        verifyNoInteractions(ventaRepository);
     }
 
     @Test
     @DisplayName("Filtra por modalidad CONTADO")
     void porModalidadContado() {
-        when(ventaRepository.findContado()).thenReturn(List.of(ventaContado(1L)));
+        Producto p = producto("Mouse", "100", 10);
+        VentaResponse contado = registrarContado(p, 1);
+        VentaResponse financiada = registrarFinanciada(p, 1, 3);
+        sincronizarYLimpiar();
 
         List<VentaResponse> r = service.buscarPorModalidad(ModalidadPago.CONTADO);
 
-        assertEquals(1, r.size());
-        assertEquals(ModalidadPago.CONTADO, r.get(0).modalidadPago());
-        verify(ventaRepository, never()).findFinanciadas();
+        assertTrue(r.stream().allMatch(v -> v.modalidadPago() == ModalidadPago.CONTADO));
+        assertTrue(r.stream().anyMatch(v -> v.id().equals(contado.id())));
+        assertTrue(r.stream().noneMatch(v -> v.id().equals(financiada.id())));
     }
 
     @Test
     @DisplayName("Filtra por modalidad FINANCIADA")
     void porModalidadFinanciada() {
-        when(ventaRepository.findFinanciadas()).thenReturn(List.of());
+        Producto p = producto("Mouse", "100", 10);
+        VentaResponse contado = registrarContado(p, 1);
+        VentaResponse financiada = registrarFinanciada(p, 1, 3);
+        sincronizarYLimpiar();
 
-        assertTrue(service.buscarPorModalidad(ModalidadPago.FINANCIADA).isEmpty());
-        verify(ventaRepository, never()).findContado();
+        List<VentaResponse> r = service.buscarPorModalidad(ModalidadPago.FINANCIADA);
+
+        assertTrue(r.stream().allMatch(v -> v.modalidadPago() == ModalidadPago.FINANCIADA));
+        assertTrue(r.stream().anyMatch(v -> v.id().equals(financiada.id())));
+        assertTrue(r.stream().noneMatch(v -> v.id().equals(contado.id())));
     }
 }
