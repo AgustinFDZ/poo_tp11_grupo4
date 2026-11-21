@@ -28,7 +28,12 @@ public final class Mapeador {
 
     public static CuotaResponse toResponse(Cuota c) {
         return new CuotaResponse(c.getId(), c.getVenta().getId(), c.getNumero(), c.getMonto(),
-                c.getFechaVencimiento(), c.isPagada(), c.getFechaPago());
+                c.getFechaVencimiento(), c.getEstado(), c.getFechaPago());
+    }
+
+    public static CobroCuotaResponse toCobroResponse(VentaFinanciada venta, Cuota cuota, boolean pagoFueraDeTermino) {
+        return new CobroCuotaResponse(venta.getId(), toResponse(cuota), pagoFueraDeTermino, venta.getEstado(),
+                (int) venta.cantidadCuotasPendientes(), venta.getSaldoPendiente());
     }
 
     /** Devuelve el DTO propio de cada modalidad de pago. */
